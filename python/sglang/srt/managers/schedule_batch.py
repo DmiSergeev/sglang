@@ -1841,18 +1841,25 @@ def release_req(
     tree_cache: BasePrefixCache,
     hisparse_coordinator: Optional[HiSparseCoordinator],
     offload_kv: bool = True,
+    is_insert: bool = False,
 ) -> None:
     if hisparse_coordinator is not None and not req.finished():
         hisparse_coordinator.retract_req(req)
 
     # In decode disaggregation the retracted KV is offloaded to host so it can be
-    # restored later without recompute (see resume_retracted_reqs/load_kv_cache).
-    # Callers that will recompute the KV instead (PD true-retraction rebootstrap)
-    # pass offload_kv=False to skip the wasteful device->host copy.
+    # restored later without recompute (see resume_retracted_reqs/load_kv_cache),
+    # so a tree-cache insert here would be a dead node. HiSparse's retract_req
+    # (above) frees a range that release_kv_cache's is_insert=False free path is
+    # sized to match exactly; is_insert=True frees a different, smaller range and
+    # hasn't been proven safe against HiSparse's free-list bookkeeping.
+    effective_is_insert = (
+        is_insert
+        and server_args.disaggregation_mode != "decode"
+        and hisparse_coordinator is None
+    )
     if server_args.disaggregation_mode == "decode" and offload_kv:
         req.offload_kv_cache(req_to_token_pool, token_to_kv_pool_allocator)
-    # TODO (csy): for preempted requests, we may want to insert into the tree
-    release_kv_cache(req, tree_cache, is_insert=False)
+    release_kv_cache(req, tree_cache, is_insert=effective_is_insert)
     # NOTE(lsyin): we should use the newly evictable memory instantly.
     num_tokens = remaing_req_count * envs.SGLANG_RETRACT_DECODE_STEPS.get()
     evict_from_tree_cache(tree_cache, num_tokens)
@@ -2750,8 +2757,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             idx = sorted_indices.pop()
             req = self.reqs[idx]
             retracted_reqs.append(req)
-            # release memory and don't insert into the tree because we need the space instantly
-            self.release_req(idx, len(sorted_indices), server_args)
+            # Insert the freed KV into the tree cache instead of discarding it: the
+            # request will resume from the waiting queue, and a freshly-inserted
+            # node is evicted last under LRU, so the prefix usually survives long
+            # enough to give the resumed request a cache hit instead of a cold
+            # re-prefill. Eviction below still reclaims it immediately if the pool
+            # is genuinely oversubscribed.
+            self.release_req(idx, len(sorted_indices), server_args, is_insert=True)
 
         reqs_to_abort: List[Req] = []
         if len(sorted_indices) <= 1 and not self.check_decode_mem(
@@ -2822,7 +2834,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         )
         return sorted_indices
 
-    def release_req(self, idx: int, remaing_req_count: int, server_args: ServerArgs):
+    def release_req(
+        self,
+        idx: int,
+        remaing_req_count: int,
+        server_args: ServerArgs,
+        is_insert: bool = False,
+    ):
         release_req(
             req=self.reqs[idx],
             remaing_req_count=remaing_req_count,
@@ -2831,6 +2849,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             tree_cache=self.tree_cache,
             hisparse_coordinator=self.hisparse_coordinator,
+            is_insert=is_insert,
         )
 
     def prepare_encoder_info_decode(self):

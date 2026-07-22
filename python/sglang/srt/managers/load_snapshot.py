@@ -206,6 +206,7 @@ class LoadSnapshot(msgspec.Struct, omit_defaults=True):
     gen_throughput: float = 0.0
     cache_hit_rate: float = 0.0
     utilization: float = 0.0
+    avg_output_len_ema: float = 0.0
 
     memory: Optional[MemoryMetrics] = None
     speculative: Optional[SpeculativeMetrics] = None

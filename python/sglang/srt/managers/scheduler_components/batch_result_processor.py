@@ -241,6 +241,9 @@ class SchedulerBatchResultProcessor:
                         self._maybe_collect_indexer_topk(req)
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
+                        self.metrics_reporter.record_completed_output_len(
+                            len(req.output_ids)
+                        )
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         maybe_cache_unfinished_req(req, self.tree_cache)
                         if self.server_args.enable_hisparse:
@@ -979,6 +982,7 @@ class SchedulerBatchResultProcessor:
                 release_kv_cache(req, self.tree_cache, is_insert=is_insert)
 
             req.time_stats.set_completion_time()
+            self.metrics_reporter.record_completed_output_len(len(req.output_ids))
 
         self._maybe_collect_customized_info(i, req, logits_output)
 

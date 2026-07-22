@@ -197,6 +197,7 @@ class SchedulerLoadInquirer:
             gen_throughput=round(stats.gen_throughput, 2),
             cache_hit_rate=round(stats.cache_hit_rate, 4),
             utilization=round(stats.utilization, 4),
+            avg_output_len_ema=round(stats.avg_output_len_ema, 2),
             memory=memory,
             speculative=speculative,
             lora=lora,

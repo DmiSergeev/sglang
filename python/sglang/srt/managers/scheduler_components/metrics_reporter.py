@@ -126,6 +126,8 @@ class SchedulerMetricsReporter:
         self.last_input_throughput: float = 0.0
         self.step_time_dict = defaultdict(list)  # Dict[batch size -> step time]
         self.stats = SchedulerStats()
+        self._output_len_ema_alpha = envs.SGLANG_DP_OUTPUT_LEN_EMA_ALPHA.get()
+        self._output_len_ema_seen = False
         self._graph_backend_label = {
             "cpu": "cpu graph",
             "npu": "npu graph",
@@ -364,6 +366,16 @@ class SchedulerMetricsReporter:
 
         # Bonus tokens updated elsewhere
         self.num_generated_tokens += num_correct_drafts
+
+    def record_completed_output_len(self, output_len: int) -> None:
+        if not self._output_len_ema_seen:
+            self.stats.avg_output_len_ema = float(output_len)
+            self._output_len_ema_seen = True
+        else:
+            alpha = self._output_len_ema_alpha
+            self.stats.avg_output_len_ema = (
+                alpha * output_len + (1 - alpha) * self.stats.avg_output_len_ema
+            )
 
     def _init_estimated_perf_constants(self) -> None:
         model_config = self.scheduler.model_config

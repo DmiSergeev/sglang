@@ -353,6 +353,10 @@ class Envs:
     # Load snapshot backend
     SGLANG_LOAD_SNAPSHOT_USE_ZMQ = EnvBool(False)
 
+    # DP load-balancing: fold expected output length into total_tokens estimates
+    SGLANG_ENABLE_DP_OUTPUT_LEN_ESTIMATE = EnvBool(True)
+    SGLANG_DP_OUTPUT_LEN_EMA_ALPHA = EnvFloat(0.02)
+
     # Scheduler: new token ratio hyperparameters
     SGLANG_INIT_NEW_TOKEN_RATIO = EnvFloat(0.7)
     SGLANG_MIN_NEW_TOKEN_RATIO_FACTOR = EnvFloat(0.14)

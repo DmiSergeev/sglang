@@ -9,6 +9,10 @@ Fragility: scheduler tests bypass `DataParallelController.__init__` via
 `_active_workers`, `round_robin_counter`, `dp_budget`). Update `_make_controller`
 if a scheduler starts reading another attr. `maybe_external_dp_rank_routing`
 is exercised as the real method, no mock.
+
+The `_req` stand-in likewise must track every attribute the scheduler methods
+actually read off a request; it now also carries `sampling_params` since
+`total_tokens_scheduler` reads `sampling_params.max_new_tokens`.
 """
 
 import unittest
@@ -22,6 +26,7 @@ from sglang.test.test_utils import CustomTestCase, maybe_stub_sgl_kernel
 
 maybe_stub_sgl_kernel()
 
+from sglang.srt.environ import envs
 from sglang.srt.managers.data_parallel_controller import (
     DataParallelController,
     DPBudget,
@@ -54,12 +59,13 @@ def _make_controller(dp_size: int) -> DataParallelController:
     return ctl
 
 
-def _req(routed_dp_rank=None, bootstrap_room=None, input_ids=None):
+def _req(routed_dp_rank=None, bootstrap_room=None, input_ids=None, max_new_tokens=None):
     """Req stand-in; SimpleNamespace avoids pinning to the Req dataclass schema."""
     return SimpleNamespace(
         routed_dp_rank=routed_dp_rank,
         bootstrap_room=bootstrap_room,
         input_ids=input_ids or [],
+        sampling_params=SimpleNamespace(max_new_tokens=max_new_tokens),
     )
 
 
@@ -116,6 +122,21 @@ class TestDPBudgetUpdateBudget(CustomTestCase):
         )
         self.assertEqual(budget.total_requests, [10, 2, 30])
         self.assertEqual(budget.total_tokens, [100, 50, 300])
+
+    def test_avg_output_len_estimate_takes_max_and_ignores_cold_start_ranks(self):
+        budget = DPBudget(dp_size=3)
+        budget.update_budget(
+            [
+                _load(dp_rank=0, timestamp=1.0, avg_output_len_ema=40.0),
+                _load(dp_rank=1, timestamp=1.0, avg_output_len_ema=0.0),
+                _load(dp_rank=2, timestamp=1.0, avg_output_len_ema=25.0),
+            ]
+        )
+        self.assertEqual(
+            budget.avg_output_len_estimate,
+            40.0,
+            "should take the max across ranks, ignoring the 0.0 cold-start rank",
+        )
 
 
 class TestDPBudgetDispatch(CustomTestCase):
@@ -259,6 +280,64 @@ class TestTotalRequestsScheduler(CustomTestCase):
             ctl.dp_budget.total_requests,
             [5, 3, 1, 4],
             "external routing must not mutate DPBudget state",
+        )
+
+
+class TestTotalTokensScheduler(CustomTestCase):
+    """total_tokens_scheduler folds an output-length estimate into
+    estimated_tokens (see DPBudget.avg_output_len_estimate)."""
+
+    def test_equal_prompt_len_different_max_new_tokens_route_differently(self):
+        ctl = _make_controller(dp_size=2)
+        ctl.dp_budget.total_tokens = [0, 0]
+        ctl.dp_budget.total_requests = [0, 0]
+        ctl.dp_budget.avg_output_len_estimate = 1000.0
+        with envs.SGLANG_ENABLE_DP_OUTPUT_LEN_ESTIMATE.override(True):
+            # Same prompt length, different caps -> different estimated_tokens
+            # -> the second request should route to the now-less-loaded rank.
+            ctl.total_tokens_scheduler(_req(input_ids=[0] * 10, max_new_tokens=5))
+            ctl.total_tokens_scheduler(_req(input_ids=[0] * 10, max_new_tokens=500))
+        ctl.workers[0].send_pyobj.assert_called_once()
+        ctl.workers[1].send_pyobj.assert_called_once()
+        self.assertEqual(
+            ctl.dp_budget.total_tokens,
+            [15, 510],
+            "requests with equal prompt length but different max_new_tokens "
+            "must produce different estimated_tokens once avg_output_len_estimate "
+            "is non-zero",
+        )
+
+    def test_disabled_by_kill_switch_falls_back_to_prompt_length_only(self):
+        ctl = _make_controller(dp_size=2)
+        ctl.dp_budget.total_tokens = [0, 0]
+        ctl.dp_budget.total_requests = [0, 0]
+        ctl.dp_budget.avg_output_len_estimate = 1000.0
+        with envs.SGLANG_ENABLE_DP_OUTPUT_LEN_ESTIMATE.override(False):
+            ctl.total_tokens_scheduler(_req(input_ids=[0] * 10, max_new_tokens=5))
+        self.assertEqual(ctl.dp_budget.total_tokens, [10, 0])
+
+
+class TestEstimatedOutputTokens(CustomTestCase):
+    """Pins the min(ema, cap) combination rule from
+    DataParallelController._estimated_output_tokens."""
+
+    def _ctl_with_estimate(self, avg_output_len_estimate: float):
+        ctl = _make_controller(dp_size=1)
+        ctl.dp_budget.avg_output_len_estimate = avg_output_len_estimate
+        return ctl
+
+    def test_cap_below_ema_wins(self):
+        ctl = self._ctl_with_estimate(1000.0)
+        with envs.SGLANG_ENABLE_DP_OUTPUT_LEN_ESTIMATE.override(True):
+            estimate = ctl._estimated_output_tokens(_req(max_new_tokens=50))
+        self.assertEqual(estimate, 50, "a low cap must clip a high EMA estimate")
+
+    def test_no_cap_uses_ema_alone(self):
+        ctl = self._ctl_with_estimate(1000.0)
+        with envs.SGLANG_ENABLE_DP_OUTPUT_LEN_ESTIMATE.override(True):
+            estimate = ctl._estimated_output_tokens(_req(max_new_tokens=None))
+        self.assertEqual(
+            estimate, 1000, "max_new_tokens=None must not clip the EMA estimate"
         )
 
 

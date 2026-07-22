@@ -97,6 +97,7 @@ class DPBudget:
         self.total_requests = [0] * dp_size
         self.total_tokens = [0] * dp_size
         self.last_timestamp = [0.0] * dp_size
+        self.avg_output_len_estimate: float = 0.0
 
     def update_budget(self, loads):
         """Update budget from shm snapshots, skipping stale reads."""
@@ -108,6 +109,18 @@ class DPBudget:
                 load.num_running_reqs + load.num_waiting_reqs
             )
             self.total_tokens[load.dp_rank] = load.num_total_tokens
+        # Single-model deployments share one output-length distribution, so
+        # each rank's EMA is a noisy sample of the same signal. Take the max
+        # across ranks reporting a non-zero EMA (rather than a mean) so a
+        # burst can't under-react to a rank that hasn't observed completions
+        # since restart; an underestimate silently reproduces the old
+        # prompt-length-only bug, while an overestimate only costs a
+        # slightly sub-optimal placement.
+        seen = [
+            load.avg_output_len_ema for load in loads if load.avg_output_len_ema > 0.0
+        ]
+        if seen:
+            self.avg_output_len_estimate = max(seen)
 
     def dispatch(self, method: LoadBalanceMethod, estimated_tokens: int = 0):
         if method == LoadBalanceMethod.TOTAL_REQUESTS:
@@ -787,11 +800,22 @@ class DataParallelController:
     def total_tokens_scheduler(self, req: Req):
         if self.maybe_external_dp_rank_routing(req):
             return
-        estimated_tokens = len(req.input_ids)
+        estimated_tokens = len(req.input_ids) + self._estimated_output_tokens(req)
         target_worker = self.dp_budget.dispatch(
             LoadBalanceMethod.TOTAL_TOKENS, estimated_tokens=estimated_tokens
         )
         sock_send(self.workers[target_worker], req)
+
+    def _estimated_output_tokens(self, req: Req) -> int:
+        if not envs.SGLANG_ENABLE_DP_OUTPUT_LEN_ESTIMATE.get():
+            return 0
+        if isinstance(req, TokenizedEmbeddingReqInput):
+            # Embedding requests never decode; their sampling_params is a
+            # dummy compatibility field, not a real cap.
+            return 0
+        cap = req.sampling_params.max_new_tokens
+        cap = float("inf") if cap is None else cap
+        return int(min(self.dp_budget.avg_output_len_estimate, cap))
 
     def event_loop(self):
         while True:

@@ -187,6 +187,7 @@ _CORE_KEYS = (
     "gen_throughput",
     "cache_hit_rate",
     "utilization",
+    "avg_output_len_ema",
 )
 
 

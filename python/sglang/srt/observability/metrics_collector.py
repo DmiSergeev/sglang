@@ -303,6 +303,13 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
             labelnames=labels.keys(),
             multiprocess_mode="mostrecent",
         )
+        self.avg_output_len_ema = Gauge(
+            name="sglang:avg_output_len_ema",
+            documentation="EMA of realized completion length, used to fold "
+            "expected output length into DP total_tokens load estimates.",
+            labelnames=labels.keys(),
+            multiprocess_mode="mostrecent",
+        )
 
         # =================================================================
         # Memory pool usage ratios
@@ -1280,6 +1287,7 @@ class SchedulerMetricsCollector(_StatLoggerDIMixin):
         self._log_gauge(self.gen_throughput, stats.gen_throughput)
         self._log_gauge(self.cache_hit_rate, stats.cache_hit_rate)
         self._log_gauge(self.decode_sum_seq_lens, stats.decode_sum_seq_lens)
+        self._log_gauge(self.avg_output_len_ema, stats.avg_output_len_ema)
 
         # Memory pool usage ratios
         self._log_gauge(self.token_usage, stats.token_usage)

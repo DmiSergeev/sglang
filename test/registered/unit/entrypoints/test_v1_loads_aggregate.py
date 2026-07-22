@@ -153,6 +153,7 @@ class TestGetLoads(CustomTestCase):
                     cache_hit_rate=0.75,
                     utilization=0.5,
                     max_running_requests=128,
+                    avg_output_len_ema=42.5,
                     disaggregation=DisaggregationMetrics(
                         mode="decode", decode_transfer_queue_reqs=4
                     ),
@@ -169,6 +170,14 @@ class TestGetLoads(CustomTestCase):
             d = loads[0].to_dict({"core"})
             self.assertNotIn("disaggregation", d)
             self.assertNotIn("queues", d)
+            self.assertEqual(
+                d["avg_output_len_ema"],
+                42.5,
+                "avg_output_len_ema must round-trip through the SHM wire "
+                "format and be present in the 'core' /v1/loads section — a "
+                "field added to LoadSnapshot but not to _CORE_KEYS silently "
+                "disappears from the API response",
+            )
 
             loads_all = asyncio.run(manager.get_loads(include=["all"], dp_rank=0))
             d_all = loads_all[0].to_dict()
